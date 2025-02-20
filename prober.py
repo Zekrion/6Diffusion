@@ -1,64 +1,43 @@
-import socket
-import time
-from ipaddress import IPv6Address
+import subprocess
+import platform
 
-def send_icmp6_probe(target_ip):
-    """Send a single ICMPv6 echo request probe and return the response"""
-    try:
-        # Create IPv6 socket
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_ICMPV6)
-        
-        # Set timeout for the socket
-        sock.settimeout(1.0)
-        
-        # Send empty echo request (ICMPv6 type 1, code 0)
-        sock.sendto(b'', (target_ip, 0))
-        
-        # Close the socket
-        sock.close()
-        
-        return True
-        
-    except Exception as e:
-        print(f"Error probing {target_ip}: {e}")
-        return False
+class IPv6Prober:
+    def __init__(self, timeout=1, count=1):
+        """
+        Initialize the IPv6 Prober.
+        :param timeout: Timeout for the ping response in seconds.
+        :param count: Number of ping attempts.
+        """
+        self.timeout = timeout
+        self.count = count
 
-def check_reachability(target_ip, probes=5, interval=1):
-    """Check reachability by sending multiple probes with a given interval"""
-    success = 0
-    
-    try:
-        # Validate IPv6 address
-        IPv6Address(target_ip)
-        
-        for _ in range(probes):
-            try:
-                if send_icmp6_probe(target_ip):
-                    success += 1
-                time.sleep(interval)
-                
-            except socket.timeout:
-                print(f"Timeout probing {target_ip}")
-                continue
-                
-            except Exception as e:
-                print(f"Probe failed: {e}")
-                continue
-                
-    except ValueError:
-        raise ValueError(f"Invalid IPv6 address: {target_ip}")
+    def is_reachable(self, ipv6_address):
+        """
+        Check if an IPv6 address is reachable.
+        :param ipv6_address: The IPv6 address to probe.
+        :return: True if reachable, False otherwise.
+        """
+        if platform.system().lower() != "windows":
+            raise EnvironmentError("This script is designed for Windows.")
 
-    reachability = (success / probes) * 100 if probes > 0 else 0
-    return {
-        'ip_address': target_ip,
-        'probes_sent': probes,
-        'successful_probes': success,
-        'reachability': round(reachability, 2),
-        'timestamp': time.time()
-    }
+        try:
+            result = subprocess.run(
+                ["ping", "-6", "-n", str(self.count), "-w", str(self.timeout * 1000), ipv6_address],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=True
+            )
+            return "Reply from" in result.stdout
+        except Exception as e:
+            print(f"Error probing {ipv6_address}: {e}")
+            return False
 
+# Example usage
 if __name__ == "__main__":
-    # Example usage:
-    target = "2001:db8::1"
-    result = check_reachability(target)
-    print(f"Reachability for {result['ip_address']}: {result['reachability']}%")
+    prober = IPv6Prober(timeout=1, count=2)
+    ipv6_test = "2001:4860:4860::8888"  # Example: Google Public DNS IPv6
+    if prober.is_reachable(ipv6_test):
+        print(f"{ipv6_test} is reachable.")
+    else:
+        print(f"{ipv6_test} is not reachable.")
