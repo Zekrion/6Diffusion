@@ -4,6 +4,20 @@ import random
 import time
 from threading import Thread
 
+class IPv6Prober:
+    """
+    A class to probe IPv6 addresses with configurable parameters.
+    
+    Args:
+        send_rate (int): Packets per second (default: 1)
+        retries (int): Number of retry attempts per address (default: 3)
+        timeout (float): Timeout in seconds for each probe (default: 2.0)
+    """
+    def __init__(self, send_rate=1, retries=3, timeout=2.0):
+        self.send_rate = send_rate
+        self.retries = retries
+        self.timeout = timeout
+
 class IPv6Scanner(IPv6Prober):
     """
     Enhanced IPv6 scanning class that provides parallel probing and improved 
