@@ -65,8 +65,6 @@ class IPv6Scanner(IPv6Prober):
                     yield addr
                     
     def probe_address(self, address):
-        """Probe a single IPv6 address with error handling"""
-        try:
         """
         Probe a single IPv6 address.
         
