@@ -64,9 +64,9 @@ def main():
     # Display results
     if not results:
         return
-        
+    
     total_reachable = sum(1 for r in results if r['successful_probes'] > 0)
-        total_ips = len(results)
+    total_ips = len(results)
         
     print("\nReachability Results:")
     print("-" * 80)
