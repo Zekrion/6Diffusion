@@ -59,26 +59,38 @@ class IPv6Scanner(IPv6Prober):
             dict: Contains 'address', 'rtt' (round trip time), and 'reachable'
         """
         packet = bytes.fromhex('0800')  # ICMPv6 Echo Request
-        for attempt in range(self.retries):
-            try:
-                sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
-                sock.setblocking(False)
-                
-                start_time = time.time()
-                sent = sock.sendto(packet, (address, 1))  # Port doesn't matter for ICMP
-                
-                ready = select.select([sock], [], [], self.timeout)
+        
+        try:
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(self.timeout)
+            
+            start_time = time.time()
+            sent = sock.sendto(packet, (address, 1))  # Port doesn't matter for ICMP
+            
+            while True:
+                ready = select.select([sock], [], [], self.timeout - (time.time() - start_time))
                 if ready[0]:
                     data, addr = sock.recvfrom(1024)
                     end_time = time.time()
                     rtt = end_time - start_time
                     return {'address': address, 'rtt': rtt, 'reachable': True}
                 
-            except socket.error as e:
-                print(f"Probe error for {address}: {e}")
+        except socket.timeout:
+            # If timeout occurs without receiving a response
+            return {'address': address, 'rtt': None, 'reachable': False}
             
-            finally:
+        except socket.error as e:
+            if e.errno == 10060:  # Connection timed out (specific to Windows)
+                return {'address': address, 'rtt': None, 'reachable': False}
+            print(f"Probe error for {address}: {e}")
+            return {'address': address, 'rtt': None, 'reachable': False}
+            
+        finally:
+            try:
                 sock.close()
+            except Exception as e:
+                pass  # Ensure we don't let exceptions from close() bubble up
         
         return {'address': address, 'rtt': None, 'reachable': False}
     
@@ -103,13 +115,21 @@ class IPv6Scanner(IPv6Prober):
                 result = self.probe_address(addr)
                 self.results.append(result)
                 self.completed += 1
-                print(f"\rScanned: {self.completed}/{num_addresses}", end='')
+                if self.completed % 10 == 0:  # Print progress every 10 addresses to avoid spamming
+                    print(f"\rScanned: {self.completed}/{num_addresses}", end='')
             except Exception as e:
                 self._handle_error(addr, e)
                 
+        threads = []
         for addr in addresses:
-            if self.running and len(Thread.active()) < self.max_threads:
-                Thread(target=thread_function, args=(addr,)).start()
+            if not self.running:
+                break
+            # Limit number of active threads
+            while len(threads) >= self.max_threads:
+                threads.pop()  # Remove the oldest thread to make way for new ones
+            thread = Thread(target=thread_function, args=(addr,))
+            thread.start()
+            threads.append(thread)
         
     def stop_scan(self):
         """
