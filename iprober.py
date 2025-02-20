@@ -1,4 +1,5 @@
 import socket
+import logging
 import select
 import random
 import time
@@ -29,6 +30,7 @@ class IPv6Scanner(IPv6Prober):
     - Statistics collection
     - More detailed reporting
     
+    Logs errors to both console and file
     Args:
         send_rate (int): Packets per second (default: 1)
         retries (int): Number of retry attempts per address (default: 3)
@@ -36,6 +38,17 @@ class IPv6Scanner(IPv6Prober):
         max_threads (int): Maximum number of parallel probes (default: 8)
     """
     def __init__(self, send_rate=1, retries=3, timeout=2.0, max_threads=8):
+        # Initialize logging
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.ERROR)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(handler)
+        
+        # Create a file handler for errors
+        file_handler = logging.FileHandler('iprober_errors.log')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(file_handler)
         super().__init__(send_rate, retries, timeout)
         self.max_threads = max_threads
         self.results = []
@@ -52,6 +65,8 @@ class IPv6Scanner(IPv6Prober):
                     yield addr
                     
     def probe_address(self, address):
+        """Probe a single IPv6 address with error handling"""
+        try:
         """
         Probe a single IPv6 address.
         
@@ -61,6 +76,7 @@ class IPv6Scanner(IPv6Prober):
         packet = bytes.fromhex('0800')  # ICMPv6 Echo Request
         
         try:
+            self.logger.info(f"Probing address: {address}")
             sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.settimeout(self.timeout)
@@ -209,7 +225,11 @@ if __name__ == '__main__':
     print("\nTest Results:")
     for address in results['addresses']:
         reachable = '✓' if address['reachable'] else '✗'
-        print(f"{address['address']} {reachable} (RTT: {address['rtt']:0.4f}s)")
+        print(f"{address['address']} {reachable}", end='')
+        if address.get('rtt'):
+            print(f" (RTT: {address['rtt']:0.4f}s)")
+        else:
+            print(" (RTT: N/A)")
     
     stats = results['stats']
     print("\nOverall Statistics:")
