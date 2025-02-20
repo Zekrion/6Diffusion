@@ -174,6 +174,47 @@ class IPv6Scanner(IPv6Prober):
             'addresses': self.results
         }
 
-# Example usage:
-# prober = IPv6Prober(send_rate=2, retries=3, timeout=2)
-# results = prober.probe_all('ipv6-addresses.txt')
+def generate_test_file():
+    """Generate test_ipv6_addresses.txt with sample addresses"""
+    import os
+    
+    test_addresses = [
+        '::1/128',  # Loopback address (localhost)
+        'fe80::a00:e000:1',  # link-local IPv6 address
+        '2001:db8::8529b:af1e:8d58:f349/64',  # IPv6 global unicast
+        'ff00::1',  # Multicast address (IPv6 link-local)
+        '2001:0db8:85a3:0000:0000:8a2e:0370:7334',  # Another global unicast
+        '::/128',   # All zeros (unreachable)
+        'fe80::dead:beef:cafe:baad',  # Link-local address with random host suffix
+        '2001:db8:1234:5678:9abc:def0:1234:5678/64'  # Another global unicast
+    ]
+    
+    filename = 'test_ipv6_addresses.txt'
+    with open(filename, 'w') as f:
+        f.write('\n'.join(test_addresses))
+        
+if __name__ == '__main__':
+    import sys, os
+    
+    # Generate test file if it doesn't exist
+    if not os.path.exists('test_ipv6_addresses.txt'):
+        generate_test_file()
+    
+    # Example usage:
+    prober = IPv6Scanner(max_threads=4)
+    print("\nRunning IPv6 probe tests...")
+    prober.start_scan('test_ipv6_addresses.txt')
+    time.sleep(2)  # Give it enough time to complete
+    results = prober.get_results()
+    print("\nTest Results:")
+    for address in results['addresses']:
+        reachable = '✓' if address['reachable'] else '✗'
+        print(f"{address['address']} {reachable} (RTT: {address['rtt']:0.4f}s)")
+    
+    stats = results['stats']
+    print("\nOverall Statistics:")
+    print(f"Total probes: {stats['total_probes']}")
+    print(f"Successful probes: {stats['successful_probes']}")
+    print(f"Unresponsive count: {stats['unresponsive_count']}")
+    print(f"Packet loss: {stats['packet_loss']}%")
+    print(f"Scan duration: {stats['scan_duration']:0.2f}s")
