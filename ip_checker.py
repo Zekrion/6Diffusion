@@ -2,13 +2,14 @@ import sys
 from prober import check_reachability
 
 def main():
+    import random
+    
     if len(sys.argv) < 2:
         print("Usage: python ip_checker.py <IPv6_address> [-f <file>] [-r] [-w]")
         return
         
     target_ips = []
     input_file = None
-    random_probes = False
     wait_time = 1
     
     # Parse command line arguments
@@ -22,19 +23,23 @@ def main():
             else:
                 print("Error: -f requires a file argument")
                 return
-        elif args[i] == '-r':
-            random_probes = True
-            i +=1
         elif args[i] == '-w':
             if i+1 < len(args):
-                wait_time = int(args[i+1])
-                i +=2
+                try:
+                    wait_time = float(args[i+1])
+                    i +=2
+                except ValueError:
+                    print(f"Invalid time value: {args[i+1]}")
+                    return
             else:
                 print("Error: -w requires a time argument")
                 return
         else:
             target_ips.append(args[i])
             i +=1
+            
+    # Set random probes if flag is present and no specific count provided
+    random_probes = '-r' in args or (len(target_ips) == 0)
             
     # Read IPs from file if specified
     if input_file:
@@ -54,7 +59,14 @@ def main():
     results = []
     for ip in target_ips:
         try:
-            result = check_reachability(ip, random_probes, wait_time)
+            if random_probes:
+                # Generate random number of probes between 1-5
+                import random
+                probe_count = random.randint(1,5)
+            else:
+                probe_count = 5
+                
+            result = check_reachability(ip, probes=probe_count, interval=wait_time)
             results.append(result)
         except ValueError as ve:
             print(f"Invalid IPv6 address: {ip}")
