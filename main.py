@@ -3,6 +3,8 @@ import numpy as np
 from diffusion.six_diffusion import SixDiffusion
 import ipaddress
 
+from torch.utils.data import TensorDataset, Subset
+
 def load_ipv6_dataset(file_path):
     """
     Reads IPv6 addresses from a .txt file, expands them, and converts them into a tensor dataset.
@@ -58,15 +60,27 @@ def tokens_to_ipv6(tokens):
 def main():
     # Load dataset
     dataset = load_ipv6_dataset("data/sample.txt")
+    
+    # Set seed for reproducibility
+    torch.manual_seed(42)
 
     train_dataset = torch.utils.data.TensorDataset(dataset)
+    
+    # Get the number of samples in the dataset
+    num_samples = len(train_dataset)
+
+    # Generate random indices with a fixed seed
+    random_indices = torch.randperm(num_samples, generator=torch.Generator().manual_seed(42))[:10000]
+
+    # Create a subset with the selected indices
+    subset_dataset = Subset(train_dataset, random_indices)
 
     # Initialize diffusion model
     diffusion_model = SixDiffusion(T=2000, d_model=512)
 
     # Train model
     print("Starting Training...")
-    diffusion_model.fit(train_dataset, epochs=10, lr=1e-3, batch_size=512)
+    diffusion_model.fit(subset_dataset, epochs=100, lr=1e-3, batch_size=128)
 
     # Generate new IPv6 addresses
     print("\nGenerating IPv6 Addresses...")
