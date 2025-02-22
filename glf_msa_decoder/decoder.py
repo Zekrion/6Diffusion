@@ -18,7 +18,7 @@ class IPv6Decoder(nn.Module):
         
         # 2. Transformer decoder with 10 GLF Blocks
         self.blocks = nn.ModuleList([
-            GLFMSABlock(d_model=d_model, window_size=2**(i//2))  # Window size doubles every 2 layers
+            GLFMSABlock(d_model=d_model, window_size=2**((i // 2) + 1))  # Window size doubles every 2 layers
             for i in range(num_layers)
         ])
 

@@ -62,16 +62,18 @@ class GLFMSABlock(nn.Module):
 
     def forward(self, x):
         B, S, D = x.shape
-        x_norm = self.norm1(x)
 
         causal_mask = torch.triu(torch.full((S, S), float('-inf'), device=x.device), diagonal=1)
-        g_out, _ = self.global_attn(x_norm, x_norm, x_norm, attn_mask=causal_mask)
-        l_out = self.local_attn(x_norm)
+        g_out, _ = self.global_attn(x, x, x, attn_mask=causal_mask)
+        l_out = self.local_attn(x)
 
         fused = torch.cat([g_out, l_out], dim=-1)
         fused = self.fuse_linear(fused)
 
-        x = x + fused
-        x = self.norm2(x + self.ff(x))
+        x = self.norm1(x + fused)
+
+        ff_x = self.ff(x)
+
+        x = self.norm2(x + ff_x)
 
         return x

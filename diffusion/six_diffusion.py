@@ -33,6 +33,11 @@ class SixDiffusion:
         """
         hex_rep = ipv6_addr.replace(":", "")
         tokens = [int(ch, 16) for ch in hex_rep]
+
+        # Normalize from [0..15] to [-1..+1]
+        tokens = (tokens - 7.5) / 7.5
+        tokens = tokens.clamp(-1.0, 1.0)
+
         return tokens
 
     def forward_diffusion_batch(self, x0_tokens_batch, t_batch):
@@ -122,9 +127,8 @@ class SixDiffusion:
         x0_pred = (x_t_batch - torch.sqrt(1.0 - alpha_t_bar).unsqueeze(1) * predicted_noise) / torch.sqrt(alpha_t_bar).unsqueeze(1)
 
         log_likelihood_loss = ((x0_pred - x0_target) ** 2).mean()
-        mse_loss = ((predicted_noise - true_noise.to(self.device)) ** 2).mean()
 
-        return kl_loss + log_likelihood_loss + mse_loss
+        return kl_loss + log_likelihood_loss
 
     def fit(self, train_dataset, epochs=10, lr=1e-3, batch_size=512):
         """
@@ -169,4 +173,11 @@ class SixDiffusion:
                 t_tensor = torch.full((num_samples,), t, dtype=torch.long, device=self.device)
                 mu_theta, sigma_theta, _ = self.compute_learned_posterior(x_t, t_tensor)
                 x_t = mu_theta + torch.sqrt(sigma_theta) * torch.randn_like(x_t)
-        return x_t
+        return inverse_normalize(x_t)
+    
+def inverse_normalize(tokens):
+    # tokens in [-1..+1], map back to [0..15]
+    tokens = (tokens * 7.5) + 7.5
+    # clamp to [0..15], round to nearest integer
+    tokens = torch.clamp(tokens, 0, 15)
+    return torch.round(tokens)

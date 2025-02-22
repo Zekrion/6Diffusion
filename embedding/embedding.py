@@ -22,6 +22,8 @@ class IPv6Embedding(nn.Module):
         # final linear to go from 64 -> 512
         self.up_proj    = nn.Linear(nibble_dim, d_model)
 
+        self.norm1 = nn.LayerNorm(d_model)
+
     def forward(self, x, t):
         """
         x: [B, 32] float noised IPv6 (each nibble is 1 float).
@@ -46,7 +48,10 @@ class IPv6Embedding(nn.Module):
         
         # 4) up-project to [B,32,512]
         x = self.up_proj(x)
-        return x
+
+        x_norm = self.norm1(x)
+        
+        return x_norm
 
 
 class TimeEmbedding(nn.Module):
