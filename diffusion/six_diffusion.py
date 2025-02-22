@@ -104,31 +104,47 @@ class SixDiffusion:
 
     def training_step(self, x0_tokens_batch):
         """
-        Performs one training step.
+        Performs one training step using the paper's two-term loss:
+        1) MSE of predicted noise vs. true noise
+        2) MSE of x_0 vs. one-step denoised x_1
         """
-
         B = x0_tokens_batch.shape[0]
-
+        
+        # 1. Sample timesteps in [1..T].
         t_batch = torch.randint(1, self.T, (B,), dtype=torch.long, device=self.device)
-
+        
+        # 2. Forward diffusion to get x_t and the true noise
+        #    'forward_diffusion_batch' should return:
+        #       x_t  = sqrt(alpha_bar_t)*x0 + sqrt(1 - alpha_bar_t)*noise
+        #       true_noise = noise
         x_t_batch, true_noise = self.forward_diffusion_batch(x0_tokens_batch, t_batch)
-        x0_target = x0_tokens_batch.to(torch.float32).to(self.device)
-
-        q_mean, q_var = self.compute_true_posterior(x0_target, x_t_batch, t_batch)
-        q_var = torch.clamp(q_var, min=1e-6)
-
-        p_mean, p_var, predicted_noise = self.compute_learned_posterior(x_t_batch, t_batch)
-        p_var = torch.clamp(p_var, min=1e-6)
-
-        kl_loss = 0.5 * torch.sum(torch.log(p_var) - torch.log(q_var) +
-                                  (q_var + (q_mean - p_mean) ** 2) / p_var - 1, dim=1).mean()
-
-        alpha_t_bar = torch.gather(self.alpha_cumprod, 0, t_batch)
-        x0_pred = (x_t_batch - torch.sqrt(1.0 - alpha_t_bar).unsqueeze(1) * predicted_noise) / torch.sqrt(alpha_t_bar).unsqueeze(1)
-
-        log_likelihood_loss = ((x0_pred - x0_target) ** 2).mean()
-
-        return kl_loss + log_likelihood_loss
+        
+        # 3. Model predicts noise from (x_t, t).  That is your “denoising network”
+        predicted_noise = self.model(x_t_batch, t_batch)   # shape [B, num_dims]
+        
+        # -- Term 2 in the paper: noise-prediction MSE.
+        kl_like_loss = torch.nn.functional.mse_loss(predicted_noise, true_noise)
+        
+        # 4. Compute x_1 “reconstruction.”  Typically for t=1, you invert one step:
+        #    x0_pred = (x_t - sqrt(1 - alpha_bar_t)*predicted_noise) / sqrt(alpha_bar_t).
+        alpha_t_bar = torch.gather(self.alpha_cumprod, 0, t_batch).to(self.device)
+        alpha_t_bar_sqrt = torch.sqrt(alpha_t_bar).unsqueeze(-1)        # shape [B,1]
+        one_minus_alpha_bar_sqrt = torch.sqrt(1.0 - alpha_t_bar).unsqueeze(-1) 
+        
+        x0_pred = ( 
+            x_t_batch - one_minus_alpha_bar_sqrt * predicted_noise
+        ) / alpha_t_bar_sqrt
+        
+        # -- Term 3 in the paper: MSE( x_0, x_1 )
+        #    The paper basically uses x0_pred as the "x_1" that is supposed to match x_0.
+        #    (They interpret it as the one-step denoised version).
+        x0_target = x0_tokens_batch.float().to(self.device)
+        recon_loss = torch.nn.functional.mse_loss(x0_pred, x0_target)
+        
+        # Final training loss is sum of these two terms
+        loss = kl_like_loss + recon_loss
+        
+        return loss
 
     def fit(self, train_dataset, epochs=10, lr=1e-3, batch_size=512):
         """
