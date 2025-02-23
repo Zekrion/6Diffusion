@@ -78,7 +78,7 @@ def main():
     
     ######################################################
     
-    sample_address = [1] * 32  # creates a list [1, 1, ..., 1] of length 32
+    sample_address = [5] * 32  # creates a list [1, 1, ..., 1] of length 32
 
     # Create a list of 1000 copies of the sample address
     toy_list = [sample_address for _ in range(1000)]
@@ -96,15 +96,15 @@ def main():
 
     # Train model
     print("Starting Training...")
-    diffusion_model.fit(subset_dataset, epochs=100, lr=0.001, batch_size=25)
+    diffusion_model.fit(subset_dataset, epochs=30, lr=0.001, batch_size=25)
 
     # Generate new IPv6 addresses
     print("\nGenerating IPv6 Addresses...")
-    generated_samples = diffusion_model.sample_ipv6(num_samples=5)
+    generated_samples = diffusion_model.sample(num_samples=1)
 
     # Print generated IPv6 addresses
     for i, sample in enumerate(generated_samples):
-        ipv6_addr = tokens_to_ipv6(sample.cpu().numpy())
+        ipv6_addr = tokens_to_ipv6(sample.cpu().detach().numpy())
         print(f"Generated IPv6 #{i+1}: {ipv6_addr}")
 
 ### === Run the Script === ###

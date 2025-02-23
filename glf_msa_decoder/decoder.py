@@ -10,7 +10,7 @@ class IPv6Decoder(nn.Module):
     - 10 Transformer layers (GLFMSABlock)
     - Final projection -> [B,32] (predicted noise)
     """
-    def __init__(self, d_model=512, embed_dim=64, num_layers=10):
+    def __init__(self, d_model=512, embed_dim=64, num_layers=2):
         super().__init__()
         
         # 1. Embedding layer

@@ -12,8 +12,10 @@ import time
 
 from tqdm import tqdm
 
+import math
+
 class SixDiffusion:
-    def __init__(self, T=2000, beta_start=1e-6, beta_end=0.01, d_model=512):
+    def __init__(self, T=2000, beta_start=1e-6, beta_end=0.001, d_model=512):
         self.T = T
         self.betas = torch.linspace(beta_start, beta_end, T, dtype=torch.float32)
         self.alphas = 1.0 - self.betas
@@ -75,11 +77,13 @@ class SixDiffusion:
         #       true_noise = noise
         x_t_batch, true_noise = self.forward_diffusion_batch(x0_tokens_batch, t_batch)
         
+        #print(x_t_batch)
+        
         # 3. Model predicts noise from (x_t, t).  That is your “denoising network”
         predicted_noise = self.model(x_t_batch, t_batch)   # shape [B, num_dims]
         
-        print("true stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(true_noise.mean().item(), true_noise.std().item(), true_noise.min().item(), true_noise.max().item()))
-        print("pred stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(predicted_noise.mean().item(), predicted_noise.std().item(), predicted_noise.min().item(), predicted_noise.max().item()))
+        #print("true stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(true_noise.mean().item(), true_noise.std().item(), true_noise.min().item(), true_noise.max().item()))
+        #print("pred stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(predicted_noise.mean().item(), predicted_noise.std().item(), predicted_noise.min().item(), predicted_noise.max().item()))
         #######################################################################################################
         
         def plot_noise_distribution(true_noise, predicted_noise):
@@ -99,7 +103,7 @@ class SixDiffusion:
             plt.show()
 
         # Call the function
-        if torch.rand(1).item() < 0.1:
+        if torch.rand(1).item() < 0.000001:
             plot_noise_distribution(true_noise, predicted_noise)
         
         ##############################################################################################################
@@ -160,22 +164,47 @@ class SixDiffusion:
             epoch_time = time.time() - start_time
             print(f"[Epoch {ep+1}/{epochs}] loss={avg_loss:.4f} | time={epoch_time:.2f}s")
 
-    def sample_ipv6(self, num_samples=1):
-        """
-        Generates IPv6 addresses by reverse diffusion.
-        """
+    def sample(self, num_samples):
+        # Assume self.T is the total diffusion steps and self.alpha_cumprod is a 1D tensor of length T
+        device = self.device
+        T = self.T
+        
         self.model.eval()
-        with torch.no_grad():
-            x_t = torch.randn(num_samples, 32).to(self.device)  # Start from Gaussian noise
-            for t in reversed(range(0, self.T, 5)):  # Sampling every 5 steps for efficiency
-                t_tensor = torch.full((num_samples,), t, dtype=torch.long, device=self.device)
-                mu_theta, sigma_theta, _ = self.compute_learned_posterior(x_t, t_tensor)
-                x_t = mu_theta + torch.sqrt(sigma_theta) * torch.randn_like(x_t)
-        return inverse_normalize(x_t)
-    
-def inverse_normalize(tokens):
-    # tokens in [-1..+1], map back to [0..15]
-    tokens = (tokens * 7.5) + 7.5
-    # clamp to [0..15], round to nearest integer
-    tokens = torch.clamp(tokens, 0, 15)
-    return torch.round(tokens)
+
+        # 1. Start with pure Gaussian noise
+        x = torch.randn(num_samples, 32, device=device)
+
+        # 2. Iterate backwards from T down to 1
+        for t in reversed(range(1, T)):
+            # Create a batch of timesteps (shape: [num_samples])
+            t_batch = torch.full((num_samples,), t, device=device, dtype=torch.long)
+            
+            # Predict the noise using your model
+            predicted_noise = self.model(x, t_batch)  # shape [num_samples, 32]
+            
+            # Get the current cumulative alpha and compute its square root
+            alpha_bar_t = self.alpha_cumprod[t]  # scalar for timestep t
+            sqrt_alpha_bar_t = math.sqrt(alpha_bar_t)
+            sqrt_one_minus_alpha_bar_t = math.sqrt(1 - alpha_bar_t)
+            
+            # Compute predicted x0 using the inversion formula
+            x0_pred = (x - sqrt_one_minus_alpha_bar_t * predicted_noise) / sqrt_alpha_bar_t
+            
+            # For t > 1, add noise; if t == 1, no extra noise is added.
+            if t > 1:
+                noise = torch.randn_like(x)
+            else:
+                noise = 0.0
+            
+            # Get the previous timestep's cumulative alpha value
+            alpha_bar_prev = self.alpha_cumprod[t - 1]
+            sqrt_alpha_bar_prev = math.sqrt(alpha_bar_prev)
+            sqrt_one_minus_alpha_bar_prev = math.sqrt(1 - alpha_bar_prev)
+            
+            # Compute x_{t-1}
+            x = sqrt_alpha_bar_prev * x0_pred + sqrt_one_minus_alpha_bar_prev * noise
+
+        # Optionally, round the values to integers if the output should be discrete
+        x = torch.round(x).clamp(0, 15)
+        
+        return x
