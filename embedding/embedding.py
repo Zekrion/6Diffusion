@@ -24,7 +24,7 @@ class TimeEmbedding(nn.Module):
     def _init_weights(self):
         for layer in self.mlp:
             if isinstance(layer, nn.Linear):
-                nn.init.xavier_normal_(layer.weight, gain=nn.init.calculate_gain('silu'))
+                nn.init.xavier_normal_(layer.weight, gain=nn.init.calculate_gain('relu'))
                 nn.init.normal_(layer.bias, std=0.02)
 
     def forward(self, t):
@@ -49,7 +49,7 @@ class IPv6Embedding(nn.Module):
         # Learnable components
         self.nibble_emb = nn.Sequential(
             nn.Linear(1, nibble_dim),
-            nn.Tanh()  # Helps bound initial embeddings
+            nn.GELU()  # Helps bound initial embeddings
         )
         self.pos_emb = nn.Embedding(seq_len, nibble_dim)
         self.time_emb = TimeEmbedding(nibble_dim)

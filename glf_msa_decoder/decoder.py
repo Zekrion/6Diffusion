@@ -26,8 +26,9 @@ class IPv6Decoder(nn.Module):
 
         # 3. Final projection with residual
         self.out_proj = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, 32),
+            nn.Linear(d_model, d_model//2),  # Intermediate dimension
+            nn.SiLU(),
+            nn.Linear(d_model//2, 1)
         )
         
         self._init_weights()
@@ -39,12 +40,16 @@ class IPv6Decoder(nn.Module):
 
     def _init_weights(self):
         """Proper weight initialization"""
+        # Initialize transformer blocks
         for block in self.blocks:
             if hasattr(block, '_init_weights'):
                 block._init_weights()
-                
-        nn.init.xavier_normal_(self.out_proj[1].weight)
-        nn.init.zeros_(self.out_proj[1].bias)
+        
+        # Initialize final projection layers
+        for layer in self.out_proj:
+            if isinstance(layer, nn.Linear):  # Only initialize Linear layers
+                nn.init.xavier_normal_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
     def forward(self, x, t):
         """
@@ -61,7 +66,7 @@ class IPv6Decoder(nn.Module):
             x = block(x)
 
         # Final projection
-        return self.out_proj(x)
+        return self.out_proj(x).squeeze(-1)
 
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

@@ -6,22 +6,26 @@ class WindowedSelfAttention(nn.Module):
     def __init__(self, d_model, n_heads, window_size):
         super().__init__()
         self.window_size = window_size
-        self.mha = nn.MultiheadAttention(
-            d_model, 
-            n_heads, 
-            batch_first=True,
-            dropout=0.1
-        )
-        
+        self.mha = nn.MultiheadAttention(d_model, n_heads, batch_first=True, dropout=0.1)
+
     def forward(self, x):
-        # Efficient windowing with einops
-        x = rearrange(x, 'b (s w) d -> (b s) w d', w=self.window_size)
-        
-        # Attention with automatic key padding mask
-        out, _ = self.mha(x, x, x)
-        
-        # Restore original shape
-        return rearrange(out, '(b s) w d -> b (s w) d', s=x.size(0)//x.size(1))
+        B, S, D = x.shape
+        assert S % self.window_size == 0, "Sequence length must be divisible by window size"
+
+        # Reshape into windows
+        x = x.view(B, S // self.window_size, self.window_size, D)
+
+        x = x.reshape(-1, self.window_size, D)  # merge batch & seq
+
+        # Compute attention within each window
+        out, w = self.mha(x, x, x, need_weights=True)
+
+        # Restore shape
+        out = out.view(B, S // self.window_size, self.window_size, D)
+
+        out = out.reshape(B, S, D)
+
+        return out
         
 
 class GLFMSABlock(nn.Module):

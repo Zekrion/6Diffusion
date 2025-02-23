@@ -25,6 +25,9 @@ class SixDiffusion:
         self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / self.alpha_cumprod)
         self.posterior_variance = self.betas * (1.0 - self.alpha_cumprod_prev) / (1.0 - self.alpha_cumprod)
         
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alpha_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alpha_cumprod)
+        
         # Initialize model
         self.model = IPv6Decoder(d_model=d_model).to(self.device)
 
@@ -72,6 +75,8 @@ class SixDiffusion:
         mse_loss = F.mse_loss(pred_noise, true_noise)
         x0_pred = (x_t - self.sqrt_one_minus_alphas_cumprod[t][:, None] * pred_noise) / self.sqrt_alphas_cumprod[t][:, None]
         recon_loss = F.mse_loss(x0_pred, x0_batch)
+        
+        print("Loss: ", mse_loss, recon_loss)
         
         return mse_loss + recon_loss
 

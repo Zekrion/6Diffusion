@@ -99,7 +99,7 @@ def main():
 
     # Train model
     print("Starting Training...")
-    diffusion_model.fit(subset_dataset, epochs=30, lr=0.001, batch_size=25)
+    diffusion_model.fit(toy_dataset, epochs=30, lr=0.001, batch_size=25)
 
     # Generate new IPv6 addresses
     print("\nGenerating IPv6 Addresses...")
