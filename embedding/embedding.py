@@ -65,6 +65,11 @@ class TimeEmbedding(nn.Module):
             nn.SiLU(),
             nn.Linear(embed_dim*4, embed_dim)
         )
+        # Initialize MLP
+        for layer in self.mlp:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+        
         self.embed_dim = embed_dim
 
     def forward(self, t):

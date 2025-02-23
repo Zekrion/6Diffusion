@@ -5,6 +5,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+import matplotlib.pyplot as plt
+
 from glf_msa_decoder.decoder import IPv6Decoder
 import time
 
@@ -35,8 +37,8 @@ class SixDiffusion:
         tokens = [int(ch, 16) for ch in hex_rep]
 
         # Normalize from [0..15] to [-1..+1]
-        tokens = (tokens - 7.5) / 7.5
-        tokens = tokens.clamp(-1.0, 1.0)
+        #tokens = (tokens - 7.5) / 7.5
+        #tokens = tokens.clamp(-1.0, 1.0)
 
         return tokens
 
@@ -48,7 +50,6 @@ class SixDiffusion:
         x0 = x0_tokens_batch.to(torch.float32).to(self.device)
         noise = torch.randn_like(x0, device=self.device)  # [B, 32]
 
-        # ✅ Fix: Remove redundant `torch.tensor()` and use `.clone().detach().to(...)`
         t_batch = t_batch.clone().detach().to(dtype=torch.long, device=self.device)
 
         alpha_bars = torch.gather(self.alpha_cumprod, 0, t_batch).view(B, 1)
@@ -56,51 +57,6 @@ class SixDiffusion:
         # Apply diffusion noise
         xt = torch.sqrt(alpha_bars) * x0 + torch.sqrt(1 - alpha_bars) * noise
         return xt, noise
-
-    def compute_true_posterior(self, x0, x_t, t):
-        """
-        Computes the true posterior q(x_{t-1} | x_t, x0).
-        """
-        alpha_t = torch.gather(self.alphas, 0, t).view(-1, 1)  # ✅ Reshape to [B,1]
-        alpha_t_bar = torch.gather(self.alpha_cumprod, 0, t).view(-1, 1)  # ✅ Reshape to [B,1]
-
-        t_prev = torch.clamp(t - 1, min=0)  # Prevent out-of-bounds
-        alpha_t_bar_prev = torch.gather(self.alpha_cumprod, 0, t_prev).view(-1, 1)  # ✅ Reshape to [B,1]
-        beta_t = torch.gather(self.betas, 0, t).view(-1, 1)  # ✅ Reshape to [B,1]
-
-        # Now all tensors have shape [B,1] and can broadcast with x0 / x_t [B, 32]
-        mu_q = ((torch.sqrt(alpha_t_bar_prev) * beta_t / (1 - alpha_t_bar)) * x0 +
-                (torch.sqrt(alpha_t) * (1 - alpha_t_bar_prev) / (1 - alpha_t_bar)) * x_t)
-        
-        sigma_q = torch.clamp((1 - alpha_t_bar_prev) * beta_t / (1 - alpha_t_bar), min=1e-6)
-
-        return mu_q, sigma_q
-
-    def compute_learned_posterior(self, x_t, t):
-        """
-        Uses the learned model to estimate the posterior p_theta(x_{t-1} | x_t).
-        """
-        alpha_t = torch.gather(self.alphas, 0, t).view(-1, 1)  # ✅ Reshape to [B,1]
-        alpha_t_bar = torch.gather(self.alpha_cumprod, 0, t).view(-1, 1)  # ✅ Reshape to [B,1]
-        beta_t = torch.gather(self.betas, 0, t).view(-1, 1)  # ✅ Reshape to [B,1]
-        alpha_t_sqrt = torch.sqrt(alpha_t)
-        alpha_bar_sqrt = torch.sqrt(alpha_t_bar)
-
-        predicted_noise = self.model(x_t, t)  # [B, 32]
-
-        # Ensure the predicted x0 uses correctly shaped scalars
-        x0_pred = (x_t - torch.sqrt(1 - alpha_t_bar) * predicted_noise) / alpha_bar_sqrt
-
-        t_prev = torch.clamp(t - 1, min=0)  # Avoid out-of-bounds
-        alpha_t_bar_prev = torch.gather(self.alpha_cumprod, 0, t_prev).view(-1, 1)  # ✅ Reshape to [B,1]
-
-        # Now, `mu_theta` can correctly broadcast with `[B, 32]`
-        mu_theta = ((torch.sqrt(alpha_t_bar_prev) * beta_t / (1 - alpha_t_bar)) * x0_pred +
-                    (torch.sqrt(alpha_t) * (1 - alpha_t_bar_prev) / (1 - alpha_t_bar)) * x_t)
-
-        sigma_theta = torch.clamp(beta_t, min=1e-6)
-
-        return mu_theta, sigma_theta, predicted_noise
 
     def training_step(self, x0_tokens_batch):
         """
@@ -122,6 +78,32 @@ class SixDiffusion:
         # 3. Model predicts noise from (x_t, t).  That is your “denoising network”
         predicted_noise = self.model(x_t_batch, t_batch)   # shape [B, num_dims]
         
+        print("true stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(true_noise.mean().item(), true_noise.std().item(), true_noise.min().item(), true_noise.max().item()))
+        print("pred stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(predicted_noise.mean().item(), predicted_noise.std().item(), predicted_noise.min().item(), predicted_noise.max().item()))
+        #######################################################################################################
+        
+        def plot_noise_distribution(true_noise, predicted_noise):
+            plt.figure(figsize=(10, 5))
+            
+            # Flatten for visualization
+            true_noise = true_noise.cpu().detach().numpy().flatten()
+            predicted_noise = predicted_noise.cpu().detach().numpy().flatten()
+            
+            plt.hist(true_noise, bins=50, alpha=0.5, label="True Noise")
+            plt.hist(predicted_noise, bins=50, alpha=0.5, label="Predicted Noise")
+            
+            plt.legend()
+            plt.title("True vs Predicted Noise Distribution")
+            plt.xlabel("Noise Value")
+            plt.ylabel("Frequency")
+            plt.show()
+
+        # Call the function
+        if torch.rand(1).item() < 0.1:
+            plot_noise_distribution(true_noise, predicted_noise)
+        
+        ##############################################################################################################
+        
         # -- Term 2 in the paper: noise-prediction MSE.
         kl_like_loss = torch.nn.functional.mse_loss(predicted_noise, true_noise)
         
@@ -138,7 +120,7 @@ class SixDiffusion:
         # -- Term 3 in the paper: MSE( x_0, x_1 )
         #    The paper basically uses x0_pred as the "x_1" that is supposed to match x_0.
         #    (They interpret it as the one-step denoised version).
-        x0_target = x0_tokens_batch.float().to(self.device)
+        x0_target = x0_tokens_batch.to(torch.float32).to(self.device)
         recon_loss = torch.nn.functional.mse_loss(x0_pred, x0_target)
         
         # Final training loss is sum of these two terms
@@ -146,7 +128,7 @@ class SixDiffusion:
         
         return loss
 
-    def fit(self, train_dataset, epochs=10, lr=1e-3, batch_size=512):
+    def fit(self, train_dataset, epochs=200, lr=0.001, batch_size=128):
         """
         Trains the model using Adam optimizer with tqdm progress bar.
         """

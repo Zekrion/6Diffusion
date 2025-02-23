@@ -3,7 +3,6 @@ import torch.nn as nn
 
 class WindowedSelfAttention(nn.Module):
     """
-    Properly splits into non-overlapping windows before computing attention.
     """
     def __init__(self, d_model, n_heads, window_size):
         super().__init__()
@@ -16,14 +15,17 @@ class WindowedSelfAttention(nn.Module):
 
         # Reshape into windows
         x = x.view(B, S // self.window_size, self.window_size, D)
-        x = x.permute(0, 2, 1, 3).reshape(-1, self.window_size, D)  # merge batch & seq
+
+        x = x.reshape(-1, self.window_size, D)  # merge batch & seq
 
         # Compute attention within each window
-        out, _ = self.mha(x, x, x)
+        out, w = self.mha(x, x, x, need_weights=True)
 
         # Restore shape
         out = out.view(B, S // self.window_size, self.window_size, D)
-        out = out.permute(0, 2, 1, 3).reshape(B, S, D)
+
+        out = out.reshape(B, S, D)
+
         return out
 
 
@@ -56,20 +58,20 @@ class GLFMSABlock(nn.Module):
             nn.Linear(d_model, 4*d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(4*d_model, d_model),
-            nn.Dropout(0.1)
+            nn.Linear(4*d_model, d_model)
         )
 
     def forward(self, x):
         B, S, D = x.shape
-
+        
         causal_mask = torch.triu(torch.full((S, S), float('-inf'), device=x.device), diagonal=1)
-        g_out, _ = self.global_attn(x, x, x, attn_mask=causal_mask)
+        g_out, _ = self.global_attn(query=x, key=x, value=x, attn_mask=causal_mask)
+
         l_out = self.local_attn(x)
 
         fused = torch.cat([g_out, l_out], dim=-1)
         fused = self.fuse_linear(fused)
-
+        
         x = self.norm1(x + fused)
 
         ff_x = self.ff(x)

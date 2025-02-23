@@ -24,6 +24,8 @@ class IPv6Decoder(nn.Module):
 
         # 3. Final projection to 1 float per nibble
         self.out_proj = nn.Linear(d_model, 1)
+        
+        self.layer_norm = nn.LayerNorm(32)
 
     def forward(self, x, t):
         """
@@ -40,5 +42,7 @@ class IPv6Decoder(nn.Module):
 
         # 3) Project to [B,32,1] -> squeeze to [B,32]
         x = self.out_proj(x).squeeze(-1)
+        
+        x = self.layer_norm(x) 
         
         return x

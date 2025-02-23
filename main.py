@@ -70,17 +70,33 @@ def main():
     num_samples = len(train_dataset)
 
     # Generate random indices with a fixed seed
-    random_indices = torch.randperm(num_samples, generator=torch.Generator().manual_seed(42))[:10000]
+    number_samples = 1000
+    random_indices = torch.randperm(num_samples, generator=torch.Generator().manual_seed(42))[:number_samples]
 
     # Create a subset with the selected indices
     subset_dataset = Subset(train_dataset, random_indices)
+    
+    ######################################################
+    
+    sample_address = [1] * 32  # creates a list [1, 1, ..., 1] of length 32
+
+    # Create a list of 1000 copies of the sample address
+    toy_list = [sample_address for _ in range(1000)]
+
+    # Convert the list to a tensor of shape (1000, 32)
+    sample_tensor = torch.tensor(toy_list, dtype=torch.float32)
+
+    # Create the TensorDataset
+    toy_dataset = TensorDataset(sample_tensor)
+    
+    ######################################################
 
     # Initialize diffusion model
     diffusion_model = SixDiffusion(T=2000, d_model=512)
 
     # Train model
     print("Starting Training...")
-    diffusion_model.fit(subset_dataset, epochs=100, lr=1e-3, batch_size=128)
+    diffusion_model.fit(subset_dataset, epochs=100, lr=0.001, batch_size=25)
 
     # Generate new IPv6 addresses
     print("\nGenerating IPv6 Addresses...")
