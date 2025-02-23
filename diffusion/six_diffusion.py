@@ -1,210 +1,133 @@
-import numpy as np
 import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-
-import matplotlib.pyplot as plt
-
-from glf_msa_decoder.decoder import IPv6Decoder
 import time
 
-from tqdm import tqdm
+from glf_msa_decoder.decoder import IPv6Decoder
 
-import math
 
 class SixDiffusion:
-    def __init__(self, T=2000, beta_start=1e-6, beta_end=0.001, d_model=512):
+    def __init__(self, T=200, beta_start=0.0001, beta_end=0.02, d_model=512, schedule_type='cosine', schedule_offset=0.008):
         self.T = T
-        self.betas = torch.linspace(beta_start, beta_end, T, dtype=torch.float32)
-        self.alphas = 1.0 - self.betas
-        self.alpha_cumprod = torch.cumprod(self.alphas, dim=0)
-
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Move precomputed alpha values to device once
-        self.alpha_cumprod = self.alpha_cumprod.to(self.device)
-        self.betas = self.betas.to(self.device)
-        self.alphas = self.alphas.to(self.device)
-
-        # Load IPv6 Diffusion Model
+        # Schedule configuration
+        if schedule_type == 'cosine':
+            self._setup_cosine_schedule(schedule_offset)
+        else:  # linear
+            self._setup_linear_schedule(beta_start, beta_end)
+        
+        # Precompute coefficients
+        self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / self.alpha_cumprod)
+        self.posterior_variance = self.betas * (1.0 - self.alpha_cumprod_prev) / (1.0 - self.alpha_cumprod)
+        
+        # Initialize model
         self.model = IPv6Decoder(d_model=d_model).to(self.device)
 
-    def transform_ipv6_to_tokens(self, ipv6_addr):
-        """
-        Convert an IPv6 address to a sequence of integer tokens (32 tokens for 32 nibbles).
-        """
-        hex_rep = ipv6_addr.replace(":", "")
-        tokens = [int(ch, 16) for ch in hex_rep]
+    def _setup_linear_schedule(self, beta_start, beta_end):
+        """Linear noise schedule"""
+        self.betas = torch.linspace(beta_start, beta_end, self.T, device=self.device)
+        self.alphas = 1. - self.betas
+        self.alpha_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.alpha_cumprod_prev = torch.cat([torch.ones(1, device=self.device), self.alpha_cumprod[:-1]])
 
-        # Normalize from [0..15] to [-1..+1]
-        #tokens = (tokens - 7.5) / 7.5
-        #tokens = tokens.clamp(-1.0, 1.0)
+    def _setup_cosine_schedule(self, s=0.008):
+        """Cosine noise schedule (improved stability)"""
+        steps = self.T + 1
+        x = torch.linspace(0, self.T, steps, device=self.device)
+        alphas_cumprod = torch.cos(((x / self.T) + s) / (1 + s) * torch.pi * 0.5) ** 2
+        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]  # Normalize to start at 1.0
+        
+        # Derive actual schedule parameters
+        self.alphas = alphas_cumprod[1:] / alphas_cumprod[:-1]
+        self.betas = 1. - self.alphas
+        self.alpha_cumprod = alphas_cumprod[1:]  # Align with T steps
+        self.alpha_cumprod_prev = torch.cat([torch.ones(1, device=self.device), self.alpha_cumprod[:-1]])
 
-        return tokens
+        # Move all to device
+        self.alphas = self.alphas.to(self.device)
+        self.betas = self.betas.to(self.device)
+        self.alpha_cumprod = self.alpha_cumprod.to(self.device)
+        self.alpha_cumprod_prev = self.alpha_cumprod_prev.to(self.device)
 
-    def forward_diffusion_batch(self, x0_tokens_batch, t_batch):
-        """
-        Applies forward diffusion to a batch of IPv6 addresses.
-        """
-        B = x0_tokens_batch.shape[0]
-        x0 = x0_tokens_batch.to(torch.float32).to(self.device)
-        noise = torch.randn_like(x0, device=self.device)  # [B, 32]
-
-        t_batch = t_batch.clone().detach().to(dtype=torch.long, device=self.device)
-
-        alpha_bars = torch.gather(self.alpha_cumprod, 0, t_batch).view(B, 1)
-
-        # Apply diffusion noise
-        xt = torch.sqrt(alpha_bars) * x0 + torch.sqrt(1 - alpha_bars) * noise
-        return xt, noise
-
-    def training_step(self, x0_tokens_batch):
-        """
-        Performs one training step using the paper's two-term loss:
-        1) MSE of predicted noise vs. true noise
-        2) MSE of x_0 vs. one-step denoised x_1
-        """
-        B = x0_tokens_batch.shape[0]
+    def forward_diffusion(self, x0, t):
+        """Combined forward process for both schedules"""
+        noise = torch.randn_like(x0)
+        sqrt_alpha_cumprod = self.alpha_cumprod[t][:, None].sqrt()
+        sqrt_one_minus_alpha_cumprod = (1. - self.alpha_cumprod[t][:, None]).sqrt()
+        return sqrt_alpha_cumprod * x0 + sqrt_one_minus_alpha_cumprod * noise, noise
+    
+    def training_step(self, x0_batch):
+        B = x0_batch.size(0)
+        t = torch.randint(0, self.T, (B,), device=self.device)
         
-        # 1. Sample timesteps in [1..T].
-        t_batch = torch.randint(1, self.T, (B,), dtype=torch.long, device=self.device)
+        x_t, true_noise = self.forward_diffusion(x0_batch, t)
+        pred_noise = self.model(x_t, t)
         
-        # 2. Forward diffusion to get x_t and the true noise
-        #    'forward_diffusion_batch' should return:
-        #       x_t  = sqrt(alpha_bar_t)*x0 + sqrt(1 - alpha_bar_t)*noise
-        #       true_noise = noise
-        x_t_batch, true_noise = self.forward_diffusion_batch(x0_tokens_batch, t_batch)
+        # Combine losses more efficiently
+        mse_loss = F.mse_loss(pred_noise, true_noise)
+        x0_pred = (x_t - self.sqrt_one_minus_alphas_cumprod[t][:, None] * pred_noise) / self.sqrt_alphas_cumprod[t][:, None]
+        recon_loss = F.mse_loss(x0_pred, x0_batch)
         
-        #print(x_t_batch)
-        
-        # 3. Model predicts noise from (x_t, t).  That is your “denoising network”
-        predicted_noise = self.model(x_t_batch, t_batch)   # shape [B, num_dims]
-        
-        #print("true stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(true_noise.mean().item(), true_noise.std().item(), true_noise.min().item(), true_noise.max().item()))
-        #print("pred stats: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}".format(predicted_noise.mean().item(), predicted_noise.std().item(), predicted_noise.min().item(), predicted_noise.max().item()))
-        #######################################################################################################
-        
-        def plot_noise_distribution(true_noise, predicted_noise):
-            plt.figure(figsize=(10, 5))
-            
-            # Flatten for visualization
-            true_noise = true_noise.cpu().detach().numpy().flatten()
-            predicted_noise = predicted_noise.cpu().detach().numpy().flatten()
-            
-            plt.hist(true_noise, bins=50, alpha=0.5, label="True Noise")
-            plt.hist(predicted_noise, bins=50, alpha=0.5, label="Predicted Noise")
-            
-            plt.legend()
-            plt.title("True vs Predicted Noise Distribution")
-            plt.xlabel("Noise Value")
-            plt.ylabel("Frequency")
-            plt.show()
-
-        # Call the function
-        if torch.rand(1).item() < 0.000001:
-            plot_noise_distribution(true_noise, predicted_noise)
-        
-        ##############################################################################################################
-        
-        # -- Term 2 in the paper: noise-prediction MSE.
-        kl_like_loss = torch.nn.functional.mse_loss(predicted_noise, true_noise)
-        
-        # 4. Compute x_1 “reconstruction.”  Typically for t=1, you invert one step:
-        #    x0_pred = (x_t - sqrt(1 - alpha_bar_t)*predicted_noise) / sqrt(alpha_bar_t).
-        alpha_t_bar = torch.gather(self.alpha_cumprod, 0, t_batch).to(self.device)
-        alpha_t_bar_sqrt = torch.sqrt(alpha_t_bar).unsqueeze(-1)        # shape [B,1]
-        one_minus_alpha_bar_sqrt = torch.sqrt(1.0 - alpha_t_bar).unsqueeze(-1) 
-        
-        x0_pred = ( 
-            x_t_batch - one_minus_alpha_bar_sqrt * predicted_noise
-        ) / alpha_t_bar_sqrt
-        
-        # -- Term 3 in the paper: MSE( x_0, x_1 )
-        #    The paper basically uses x0_pred as the "x_1" that is supposed to match x_0.
-        #    (They interpret it as the one-step denoised version).
-        x0_target = x0_tokens_batch.to(torch.float32).to(self.device)
-        recon_loss = torch.nn.functional.mse_loss(x0_pred, x0_target)
-        
-        # Final training loss is sum of these two terms
-        loss = kl_like_loss + recon_loss
-        
-        return loss
+        return mse_loss + recon_loss
 
     def fit(self, train_dataset, epochs=200, lr=0.001, batch_size=128):
-        """
-        Trains the model using Adam optimizer with tqdm progress bar.
-        """
-        optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.model.train()
-
-        data_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-        for ep in range(epochs):
-            start_time = time.time()
-            running_loss = 0.0
-
-            # ✅ Wrap data_loader in tqdm to show progress bar
-            with tqdm(data_loader, desc=f"Epoch {ep+1}/{epochs}", unit="batch") as pbar:
-                for batch in pbar:
-                    x0_batch = batch[0]
-
-                    loss = self.training_step(x0_batch)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
+        loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+        
+        for epoch in range(epochs):
+            self.model.train()
+            total_loss = 0.0
+            
+            with tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
+                for x0_batch, in pbar:
+                    x0_batch = x0_batch.to(self.device)
+                    
                     optimizer.zero_grad()
+                    loss = self.training_step(x0_batch)
                     loss.backward()
                     optimizer.step()
-
-                    running_loss += loss.item()
-
-                    # ✅ Update tqdm progress bar with live loss value
+                    
+                    total_loss += loss.item()
                     pbar.set_postfix(loss=loss.item())
+            
+            print(f"Epoch {epoch+1} | Avg Loss: {total_loss/len(loader):.4f}")
 
-            avg_loss = running_loss / len(data_loader)
-            epoch_time = time.time() - start_time
-            print(f"[Epoch {ep+1}/{epochs}] loss={avg_loss:.4f} | time={epoch_time:.2f}s")
-
-    def sample(self, num_samples):
-        # Assume self.T is the total diffusion steps and self.alpha_cumprod is a 1D tensor of length T
-        device = self.device
-        T = self.T
-        
+    @torch.no_grad()
+    def sample(self, num_samples, return_all_steps=False):
         self.model.eval()
+        x = torch.randn(num_samples, 32, device=self.device)
+        steps = []
+        
+        for t in reversed(range(1, self.T)):
+            t_batch = torch.full((num_samples,), t, device=self.device)
+            pred_noise = self.model(x, t_batch)
+            
+            # Use precomputed parameters for reverse process
+            x = self._reverse_step(x, t, pred_noise)
+            
+            if return_all_steps:
+                steps.append(self.reverse_normalize(x.clone()))
+        
+        return steps if return_all_steps else self.reverse_normalize(x)
 
-        # 1. Start with pure Gaussian noise
-        x = torch.randn(num_samples, 32, device=device)
-
-        # 2. Iterate backwards from T down to 1
-        for t in reversed(range(1, T)):
-            # Create a batch of timesteps (shape: [num_samples])
-            t_batch = torch.full((num_samples,), t, device=device, dtype=torch.long)
-            
-            # Predict the noise using your model
-            predicted_noise = self.model(x, t_batch)  # shape [num_samples, 32]
-            
-            # Get the current cumulative alpha and compute its square root
-            alpha_bar_t = self.alpha_cumprod[t]  # scalar for timestep t
-            sqrt_alpha_bar_t = math.sqrt(alpha_bar_t)
-            sqrt_one_minus_alpha_bar_t = math.sqrt(1 - alpha_bar_t)
-            
-            # Compute predicted x0 using the inversion formula
-            x0_pred = (x - sqrt_one_minus_alpha_bar_t * predicted_noise) / sqrt_alpha_bar_t
-            
-            # For t > 1, add noise; if t == 1, no extra noise is added.
-            if t > 1:
-                noise = torch.randn_like(x)
-            else:
-                noise = 0.0
-            
-            # Get the previous timestep's cumulative alpha value
-            alpha_bar_prev = self.alpha_cumprod[t - 1]
-            sqrt_alpha_bar_prev = math.sqrt(alpha_bar_prev)
-            sqrt_one_minus_alpha_bar_prev = math.sqrt(1 - alpha_bar_prev)
-            
-            # Compute x_{t-1}
-            x = sqrt_alpha_bar_prev * x0_pred + sqrt_one_minus_alpha_bar_prev * noise
-
-        # Optionally, round the values to integers if the output should be discrete
-        x = torch.round(x).clamp(0, 15)
+    def _reverse_step(self, x, t, pred_noise):
+        beta_t = self.betas[t]
+        sqrt_recip_alpha_t = self.sqrt_recip_alphas[t]
+        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
+        
+        # Main reverse step calculation
+        x = sqrt_recip_alpha_t * (x - beta_t * pred_noise / sqrt_one_minus_alpha_cumprod_t)
+        
+        if t > 0:
+            x += torch.sqrt(self.posterior_variance[t-1]) * torch.randn_like(x)
         
         return x
+
+    @staticmethod
+    def reverse_normalize(tensor):
+        return torch.clamp(((tensor + 1) * 7.5).round(), 0, 15).int()

@@ -16,24 +16,25 @@ def load_ipv6_dataset(file_path):
         for line in f.readlines():
             addr = line.strip()
             if not addr or "#" in addr:  # Skip invalid lines
-                print(f"⚠️ Skipping invalid line: {addr}")
+                print(f"Skipping invalid line: {addr}")
                 continue
 
             try:
                 full_ipv6 = str(ipaddress.IPv6Address(addr).exploded)  # Expand compressed IPv6
                 ipv6_addresses.append(full_ipv6)
             except ValueError:
-                print(f"❌ Error: Invalid IPv6 address format: {addr}")
+                print(f"Error: Invalid IPv6 address format: {addr}")
 
     # Convert IPv6 addresses into tokenized integer representation
     def transform_ipv6_to_tokens(ipv6_addr):
         hex_rep = ipv6_addr.replace(":", "").lower()  # Remove colons & lowercase
         try:
             tokens = [int(ch, 16) for ch in hex_rep]  # Convert each hex digit to int (0-15)
+            normalized_tokens = [(token / 7.5) - 1 for token in tokens]  # Scale to [-1, 1]
         except ValueError:
-            print(f"❌ Error: Invalid characters in IPv6 address {ipv6_addr}")
+            print(f"Error: Invalid characters in IPv6 address {ipv6_addr}")
             return None
-        return tokens
+        return normalized_tokens
 
     tokenized_data = [transform_ipv6_to_tokens(addr) for addr in ipv6_addresses]
     tokenized_data = [t for t in tokenized_data if t is not None]  # Remove None values
@@ -65,6 +66,8 @@ def main():
     torch.manual_seed(42)
 
     train_dataset = torch.utils.data.TensorDataset(dataset)
+
+    ### Subset Dataset #####################################################
     
     # Get the number of samples in the dataset
     num_samples = len(train_dataset)
@@ -76,7 +79,7 @@ def main():
     # Create a subset with the selected indices
     subset_dataset = Subset(train_dataset, random_indices)
     
-    ######################################################
+    ### Toy Dataset ##########################################################
     
     sample_address = [5] * 32  # creates a list [1, 1, ..., 1] of length 32
 
@@ -89,7 +92,7 @@ def main():
     # Create the TensorDataset
     toy_dataset = TensorDataset(sample_tensor)
     
-    ######################################################
+    ### Training and Inference ################################################
 
     # Initialize diffusion model
     diffusion_model = SixDiffusion(T=2000, d_model=512)
