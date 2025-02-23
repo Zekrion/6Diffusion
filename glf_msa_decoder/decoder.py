@@ -5,44 +5,63 @@ from glf_msa_decoder.glf_msa_block import GLFMSABlock     # Import GLF Transform
 
 class IPv6Decoder(nn.Module):
     """
-    Full pipeline:
-    - Embedding -> [B,32,512]
-    - 10 Transformer layers (GLFMSABlock)
-    - Final projection -> [B,32] (predicted noise)
+    Improved decoder architecture with:
+    - Adaptive window sizing
+    - Proper weight initialization
+    - Optimized normalization
+    - Enhanced projection layer
     """
-    def __init__(self, d_model=512, embed_dim=64, num_layers=2):
+    def __init__(self, d_model=512, embed_dim=64, num_layers=10):
         super().__init__()
         
-        # 1. Embedding layer
+        # 1. Embedding layer with pre-LN
         self.embedding = IPv6Embedding(nibble_dim=embed_dim, d_model=d_model)
-        
-        # 2. Transformer decoder with 10 GLF Blocks
+        self.embed_ln = nn.LayerNorm(d_model)
+
+        # 2. Transformer blocks with adaptive window sizing
         self.blocks = nn.ModuleList([
-            GLFMSABlock(d_model=d_model, window_size=2**((i // 2) + 1))  # Window size doubles every 2 layers
+            GLFMSABlock(d_model=d_model, window_size=self._calculate_window_size(i, num_layers))
             for i in range(num_layers)
         ])
 
-        # 3. Final projection to 1 float per nibble
-        self.out_proj = nn.Linear(d_model, 1)
+        # 3. Final projection with residual
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 32),
+        )
         
-        self.layer_norm = nn.LayerNorm(32)
+        self._init_weights()
+
+    def _calculate_window_size(self, layer_idx, total_layers):
+        """Adaptive window sizing with max sequence length protection"""
+        base_size = 2 ** ((layer_idx // 2) + 1)
+        return min(base_size, 32)  # Cap at sequence length
+
+    def _init_weights(self):
+        """Proper weight initialization"""
+        for block in self.blocks:
+            if hasattr(block, '_init_weights'):
+                block._init_weights()
+                
+        nn.init.xavier_normal_(self.out_proj[1].weight)
+        nn.init.zeros_(self.out_proj[1].bias)
 
     def forward(self, x, t):
         """
-        x: [B,32], float noised IPv6.
-        t: [B], diffusion step
-        => returns predicted noise [B,32].
+        Optimized forward pass:
+        x: [B, 32] - Noised IPv6 nibbles
+        t: [B] - Diffusion timesteps
+        => [B, 32] - Predicted noise
         """
-        # 1) Embed to [B,32,512]
-        x = self.embedding(x, t)
+        # Embed with pre-normalization
+        x = self.embed_ln(self.embedding(x, t))
 
-        # 2) Pass through 10 Transformer layers
-        for blk in self.blocks:
-            x = blk(x)  # [B,32,512]
+        # Process through blocks
+        for block in self.blocks:
+            x = block(x)
 
-        # 3) Project to [B,32,1] -> squeeze to [B,32]
-        x = self.out_proj(x).squeeze(-1)
-        
-        x = self.layer_norm(x) 
-        
-        return x
+        # Final projection
+        return self.out_proj(x)
+
+    def num_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

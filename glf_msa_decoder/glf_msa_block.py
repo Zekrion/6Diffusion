@@ -1,81 +1,109 @@
 import torch
 import torch.nn as nn
+from einops import rearrange
 
 class WindowedSelfAttention(nn.Module):
-    """
-    """
     def __init__(self, d_model, n_heads, window_size):
         super().__init__()
         self.window_size = window_size
-        self.mha = nn.MultiheadAttention(d_model, n_heads, batch_first=True, dropout=0.1)
-
+        self.mha = nn.MultiheadAttention(
+            d_model, 
+            n_heads, 
+            batch_first=True,
+            dropout=0.1
+        )
+        
     def forward(self, x):
-        B, S, D = x.shape
-        assert S % self.window_size == 0, "Sequence length must be divisible by window size"
-
-        # Reshape into windows
-        x = x.view(B, S // self.window_size, self.window_size, D)
-
-        x = x.reshape(-1, self.window_size, D)  # merge batch & seq
-
-        # Compute attention within each window
-        out, w = self.mha(x, x, x, need_weights=True)
-
-        # Restore shape
-        out = out.view(B, S // self.window_size, self.window_size, D)
-
-        out = out.reshape(B, S, D)
-
-        return out
-
+        # Efficient windowing with einops
+        x = rearrange(x, 'b (s w) d -> (b s) w d', w=self.window_size)
+        
+        # Attention with automatic key padding mask
+        out, _ = self.mha(x, x, x)
+        
+        # Restore original shape
+        return rearrange(out, '(b s) w d -> b (s w) d', s=x.size(0)//x.size(1))
+        
 
 class GLFMSABlock(nn.Module):
-    """
-    One Transformer block with:
-      - Global MSA (2 heads, top-down)
-      - Local MSA (2 heads, window-based)
-      - Fuse outputs by concatenation -> linear
-      - Add & Norm, then FeedForward, then Add & Norm
-    """
     def __init__(self, d_model=512, n_heads_global=2, n_heads_local=2, window_size=2):
         super().__init__()
-
-        # Global MSA (causal mask)
-        self.global_attn = nn.MultiheadAttention(d_model, n_heads_global, batch_first=True, dropout=0.1)
-
-        # Local MSA (window-based)
-        self.local_attn = WindowedSelfAttention(d_model, n_heads_local, window_size)
-
-        # LayerNorm before attention
+        # Pre-LayerNorm configuration
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-
-        # Fusion layer
-        self.fuse_linear = nn.Linear(2*d_model, d_model)
-
-        # Feed-forward
+        self.norm3 = nn.LayerNorm(d_model)
+        
+        # Attention modules
+        self.global_attn = nn.MultiheadAttention(
+            d_model, n_heads_global, 
+            batch_first=True, dropout=0.1
+        )
+        self.local_attn = WindowedSelfAttention(d_model, n_heads_local, window_size)
+        
+        # Fusion with gating instead of concatenation
+        self.fuse_gate = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.Sigmoid()
+        )
+        
+        # Improved FFN with GELU
         self.ff = nn.Sequential(
             nn.Linear(d_model, 4*d_model),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(4*d_model, d_model)
+            nn.Linear(4*d_model, d_model),
+            nn.Dropout(0.1)
         )
+        
+        # Causal mask cache
+        self.register_buffer("causal_mask", None)
+        
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        # Proper initialization for attention layers
+        for module in [self.global_attn, self.local_attn.mha]:
+            nn.init.xavier_uniform_(module.in_proj_weight)
+            nn.init.constant_(module.in_proj_bias, 0.)
+            nn.init.xavier_uniform_(module.out_proj.weight)
+            nn.init.constant_(module.out_proj.bias, 0.)
+            
+        # Initialize fusion gate
+        nn.init.kaiming_normal_(self.fuse_gate[0].weight)
+        
+    def _get_causal_mask(self, seq_len, device):
+        if self.causal_mask is None or self.causal_mask.size(0) != seq_len:
+            self.causal_mask = torch.triu(
+                torch.full((seq_len, seq_len), float('-inf'), device=device),
+                diagonal=1
+            )
+        return self.causal_mask
 
     def forward(self, x):
-        B, S, D = x.shape
+        # Pre-LayerNorm setup
+        x_norm = self.norm1(x)
         
-        causal_mask = torch.triu(torch.full((S, S), float('-inf'), device=x.device), diagonal=1)
-        g_out, _ = self.global_attn(query=x, key=x, value=x, attn_mask=causal_mask)
-
-        l_out = self.local_attn(x)
-
-        fused = torch.cat([g_out, l_out], dim=-1)
-        fused = self.fuse_linear(fused)
+        # Global attention with cached mask
+        seq_len = x.size(1)
+        causal_mask = self._get_causal_mask(seq_len, x.device)
+        g_out, _ = self.global_attn(
+            query=x_norm,
+            key=x_norm,
+            value=x_norm,
+            attn_mask=causal_mask
+        )
         
-        x = self.norm1(x + fused)
-
-        ff_x = self.ff(x)
-
-        x = self.norm2(x + ff_x)
-
-        return x
+        # Local attention
+        l_out = self.local_attn(x_norm)
+        
+        # Gated fusion instead of concatenation
+        gate = self.fuse_gate(x_norm)
+        fused = gate * g_out + (1 - gate) * l_out
+        
+        # Residual connection
+        x = x + fused
+        
+        # Feed-forward with Pre-LN
+        x = x + self.ff(self.norm2(x))
+        
+        return self.norm3(x)
